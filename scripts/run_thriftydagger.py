@@ -138,6 +138,7 @@ if __name__ == '__main__':
                 robot=active_robot,
                 active_arm=arm_,
                 env_configuration=config_)
+            # print("gripper pos = ", env.env.observation_spec()['robot0_eef_pos'])
             env.render()
             time.sleep(0.001)
             if a[3] != 0: # z is pressed
@@ -160,6 +161,7 @@ if __name__ == '__main__':
                 robot=active_robot,
                 active_arm=arm_,
                 env_configuration=config_)
+            # print("gripper pos = ", env.env.observation_spec()['robot0_eef_pos'])
             env.render()
             time.sleep(0.001)
         return a
@@ -168,8 +170,8 @@ if __name__ == '__main__':
     if args.algo_sup:
         expert_pol = HardcodedPolicy(env).act
     if args.gen_data:
-    	NUM_BC_EPISODES = 30
-    	generate_offline_data(env, expert_policy=expert_pol, num_episodes=NUM_BC_EPISODES, seed=args.seed,
+        NUM_BC_EPISODES = 30
+        generate_offline_data(env, expert_policy=expert_pol, num_episodes=NUM_BC_EPISODES, seed=args.seed,
             output_file="robosuite-{}.pkl".format(NUM_BC_EPISODES), robosuite=True, robosuite_cfg=robosuite_cfg)
     if args.hgdagger:
         thrifty(env, iters=args.iters, logger_kwargs=logger_kwargs, device_idx=args.device, target_rate=args.targetrate, 

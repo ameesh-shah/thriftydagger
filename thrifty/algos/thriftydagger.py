@@ -187,9 +187,11 @@ def thrifty(env, iters=5, actor_critic=core.Ensemble, ac_kwargs=dict(),
     logger = EpochLogger(**logger_kwargs)
     _locals = locals()
     del _locals['env']
-    logger.save_config(_locals)
+    # logger.save_config(_locals)
     if device_idx >= 0:
         device = torch.device("cuda", device_idx)
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
     else:
         device = torch.device("cpu")
 
@@ -277,12 +279,44 @@ def thrifty(env, iters=5, actor_critic=core.Ensemble, ac_kwargs=dict(),
                     p_targ.data.mul_(.995)
                     p_targ.data.add_((1 - .995) * p.data)
         return loss_q.item()
+    
+    safety_boundaries = {}
+    safety_boundaries['left']  = -0.365
+    safety_boundaries['right'] =  0.365
+    safety_boundaries['front'] =  0.300
+    safety_boundaries['back']  = -0.370
+    safety_boundaries['top']   =  1.150
+    safety_boundaries['bottom']=  0.700
 
     # Prepare for interaction with environment
     online_burden = 0 # how many labels we get from supervisor
     num_switch_to_human = 0 # context switches (due to novelty)
     num_switch_to_human2 = 0 # context switches (due to risk)
     num_switch_to_robot = 0
+    num_switch_policy_x_violation = 0
+    num_switch_policy_y_violation = 0
+    num_switch_policy_z_violation = 0
+    num_switch_policy_near_wooden_block = 0
+    num_expert_x_violation = 0
+    num_expert_y_violation = 0
+    num_expert_z_violation = 0
+    num_expert_near_wooden_block = 0
+    
+
+    wooden_block_x = 0.1
+    wooden_block_y = 0.22
+    wooden_block_z_bottom = 0.83
+    wooden_block_z_top = 0.91
+
+    def radial_dist(x1, y1, z1, x2, y2, z2):
+        return np.sqrt((x1-x2)**2 + (y1-y2)**2 + (z1-z2)**2)
+    
+    def is_near_wooden_block(x, y, z):
+        clossness = 0.02
+        near_bottom = radial_dist(x, y, z, wooden_block_x, wooden_block_y, wooden_block_z_bottom) < clossness
+        near_top = radial_dist(x, y, z, wooden_block_x, wooden_block_y, wooden_block_z_top) < clossness
+        return near_bottom or near_top
+
 
     def test_agent(epoch=0):
         """Run test episodes"""
@@ -356,7 +390,8 @@ def thrifty(env, iters=5, actor_critic=core.Ensemble, ac_kwargs=dict(),
     print("Estimated switch-to threshold: {}".format(switch2human_thresh))
     switch2human_thresh2 = 0.48 # a priori guess: 48% discounted probability of success. Could also estimate from data
     switch2robot_thresh2 = 0.495
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     # we only needed the held out set to check valid loss and compute thresholds, so we can get rid of it.
     replay_buffer.fill_buffer(held_out_data['obs'], held_out_data['act'])
 
@@ -380,6 +415,7 @@ def thrifty(env, iters=5, actor_critic=core.Ensemble, ac_kwargs=dict(),
             while i < obs_per_iter and not d:
                 a = ac.act(o)
                 a = np.clip(a, -act_limit, act_limit)
+                y, x, z = env.env.observation_spec()['robot0_eef_pos']
                 if not expert_mode:
                     estimates.append(ac.variance(o))
                     estimates2.append(ac.safety(o,a))
@@ -389,6 +425,14 @@ def thrifty(env, iters=5, actor_critic=core.Ensemble, ac_kwargs=dict(),
                     replay_buffer.store(o, a_expert)
                     online_burden += 1
                     risk.append(ac.safety(o, a_expert))
+                    if x < safety_boundaries['left'] or x > safety_boundaries['right']:
+                        num_expert_x_violation += 1
+                    if y < safety_boundaries['back'] or y > safety_boundaries['front']:
+                        num_expert_y_violation += 1
+                    if z < safety_boundaries['bottom'] or z > safety_boundaries['top']:
+                        num_expert_z_violation += 1
+                    if is_near_wooden_block(x, y, z):
+                        num_expert_near_wooden_block += 1
                     if (hg_dagger and a_expert[3] != 0) or (not hg_dagger and sum((a - a_expert) ** 2) < switch2robot_thresh 
                         and (not q_learning or ac.safety(o, a) > switch2robot_thresh2)):
                         print("Switch to Robot")
@@ -411,6 +455,28 @@ def thrifty(env, iters=5, actor_critic=core.Ensemble, ac_kwargs=dict(),
                 elif not hg_dagger and q_learning and ac.safety(o,a) < switch2human_thresh2:
                     print("Switch to Human (Risk)")
                     num_switch_to_human2 += 1
+                    expert_mode = True
+                    continue
+                # action = (dx, dy, dz, droll, dpitch, dyaw, grasp == 1)
+                # let's enforce the safety constraints here
+                elif x < safety_boundaries['left'] or x > safety_boundaries['right']:
+                    print("Switch to Human (Safety - X) = x, left, right", x, safety_boundaries['left'], safety_boundaries['right'])
+                    num_switch_policy_x_violation += 1
+                    expert_mode = True
+                    continue
+                elif y < safety_boundaries['back'] or y > safety_boundaries['front']:
+                    print("Switch to Human (Safety - Y) = y, back, front", y, safety_boundaries['back'], safety_boundaries['front'])
+                    num_switch_policy_y_violation += 1
+                    expert_mode = True
+                    continue
+                elif z < safety_boundaries['bottom'] or z > safety_boundaries['top']:
+                    print("Switch to Human (Safety - Z) = z, bottom, top", z, safety_boundaries['bottom'], safety_boundaries['top'])
+                    num_switch_policy_z_violation += 1
+                    expert_mode = True
+                    continue
+                elif is_near_wooden_block(x, y, z):
+                    print("Switch to Human (Safety - Wooden Block) = x, y, z", x, y, z)
+                    num_switch_policy_near_wooden_block += 1
                     expert_mode = True
                     continue
                 else:
@@ -494,3 +560,11 @@ def thrifty(env, iters=5, actor_critic=core.Ensemble, ac_kwargs=dict(),
         print('NumSwitchToNov', num_switch_to_human)
         print('NumSwitchToRisk', num_switch_to_human2)
         print('NumSwitchBack', num_switch_to_robot)
+        print('NumSwitchPolicyXViolation', num_switch_policy_x_violation)
+        print('NumSwitchPolicyYViolation', num_switch_policy_y_violation)
+        print('NumSwitchPolicyZViolation', num_switch_policy_z_violation)
+        print('NumSwitchPolicyNearWoodenBlock', num_switch_policy_near_wooden_block)
+        print('NumExpertXViolation', num_expert_x_violation)
+        print('NumExpertYViolation', num_expert_y_violation)
+        print('NumExpertZViolation', num_expert_z_violation)
+        print('NumExpertNearWoodenBlock', num_expert_near_wooden_block)
