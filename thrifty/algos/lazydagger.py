@@ -112,6 +112,8 @@ def lazy(env, iters=10, actor_critic=core.MLP, ac_kwargs=dict(),
     logger.save_config(_locals)
     if device_idx >= 0:
         device = torch.device("cuda", device_idx)
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
     else:
         device = torch.device("cpu")
 
